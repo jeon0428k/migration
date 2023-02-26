@@ -127,13 +127,13 @@ print(grouped_tabs)
 
 
 def get_select(engine, conn, metadata, table_name):
-    data = Table(table_name, src_metadata, autoload_with=src_engine)
+    data = Table(table_name, metadata, autoload_with=engine)
     query = select(data)
     return conn.execute(query)
 
 
 def set_insert(engine, conn, metadata, table_name, new_data):
-    data = Table(table_name, src_metadata, autoload_with=src_engine)
+    data = Table(table_name, metadata, autoload_with=engine)
     query = insert(data).values(**new_data).on_duplicate_key_update(
         name=insert(data).values.name
     )
@@ -149,8 +149,9 @@ for key in grouped_tabs:
             dst_engine, dst_conn, dst_metadata = create_connect(DbMcsConfig, tab['TABLE_SCHEMA'])
 
         src_results = get_select(src_engine, src_conn, src_metadata, tab['TABLE_NAME'])
-        dst_results = set_insert(dst_engine, dst_conn, dst_metadata, tab['TABLE_NAME'], src_results)
-        print(dst_results.rowcount)
+        for d in src_results:
+            dst_results = set_insert(dst_engine, dst_conn, dst_metadata, tab['TABLE_NAME'], d)
+            print(dst_results.rowcount)
 
 # for row in src_tabs:
 #     engine, conn, metadata = DB_CONN.get(row['TABLE_SCHEMA'])
