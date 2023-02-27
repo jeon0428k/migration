@@ -1,7 +1,10 @@
-from sqlalchemy import create_engine, MetaData, Table, select, text, tuple_, not_, inspect, insert
-from sqlalchemy.ext.automap import automap_base
+from functools import reduce
+
+from sqlalchemy import create_engine, MetaData, Table, select, tuple_, text
+from sqlalchemy.orm import sessionmaker
 from tabulate import tabulate
 from itertools import groupby
+from sqlalchemy.dialects.mysql import Insert
 
 EXCLUDE_TABLES = [
     ('DB1', 'TAB3')
@@ -18,7 +21,6 @@ def get_info_tabs(engine, conn, metadata):
     query = query.where(data.c.TABLE_SCHEMA.in_(['DB1', 'DB2', 'DB3']))
     query = query.order_by(data.c.TABLE_SCHEMA, data.c.TABLE_NAME)
 
-    # print(query)
     return [{
         'TABLE_SCHEMA': row.TABLE_SCHEMA,
         'TABLE_NAME': row.TABLE_NAME
@@ -75,6 +77,12 @@ def create_connect(info, table_schema):
     return engine, conn, meta
 
 
+def create_connect2(info, table_schema):
+    engine = create_engine(f"mysql+pymysql://{info['user']}:{info['passwd']}@{info['host']}:{info['port']}/{table_schema}")
+    meta = MetaData()
+    return engine, meta
+
+
 def dict_diff(src: [], dst: []):
     src_values = [tuple(d.values()) for d in src]
     # print(src_values)
@@ -129,55 +137,56 @@ print(grouped_tabs)
 def get_select(engine, conn, metadata, table_name):
     data = Table(table_name, metadata, autoload_with=engine)
     query = select(data)
-    return conn.execute(query)
+    return conn.execute(query), data
 
 
 def set_insert(engine, conn, metadata, table_name, new_data):
     data = Table(table_name, metadata, autoload_with=engine)
-    query = insert(data).values(**new_data).on_duplicate_key_update(
-        name=insert(data).values.name
-    )
+    query = Insert(data).values(new_data)
+    cols = reduce(lambda acc, item: {**acc, **{item.name: query.inserted[item.name]}}, data.columns, {})
+    query = query.on_duplicate_key_update(cols)
     print(query)
     return conn.execute(query)
+
+
+def set_inserts(engine, conn, metadata, table_name):
+    results, tabs = get_select(engine, conn, metadata, table_name)
+
+    # for src_result in src_results:
+    #     dst_results = set_insert(dst_engine, dst_conn, dst_metadata, tab['TABLE_NAME'], src_result)
+    #     print(dst_results.rowcount)
+
+    print(f"> {tab['TABLE_SCHEMA']}.{tab['TABLE_NAME']}")
+
+    columns = tabs.columns.keys()
+    fetchall = results.all()
+    print('fetchall', fetchall)
+
+    if len(fetchall) > 0:
+        cols = ', '.join(columns)
+        values = ':' + ', :'.join(columns)
+        params = ", ".join([f"{col}=VALUES({col})" for col in columns])
+        print('cols', cols)
+        print('values', values)
+        print('params', params)
+
+        insert_query = text(f"INSERT INTO {table_name} ({cols}) VALUES ({values}) ON DUPLICATE KEY UPDATE {params}")
+        print('insert_query', insert_query)
+
+        new_datas = [dict(zip(columns, tuple(row))) for row in fetchall]
+        dst_results = conn.execute(insert_query, new_datas)
+        print(dst_results.rowcount)
+
+        conn.commit()
 
 
 for key in grouped_tabs:
     tabs = grouped_tabs[key]
     for index, tab in enumerate(tabs):
-        if index == 0:
-            src_engine, src_conn, src_metadata = create_connect(DbWltConfig, tab['TABLE_SCHEMA'])
-            dst_engine, dst_conn, dst_metadata = create_connect(DbMcsConfig, tab['TABLE_SCHEMA'])
+        src_engine, src_conn, src_metadata = create_connect(DbWltConfig, tab['TABLE_SCHEMA'])
+        dst_engine, dst_conn, dst_metadata = create_connect(DbMcsConfig, tab['TABLE_SCHEMA'])
 
-        src_results = get_select(src_engine, src_conn, src_metadata, tab['TABLE_NAME'])
-        for d in src_results:
-            dst_results = set_insert(dst_engine, dst_conn, dst_metadata, tab['TABLE_NAME'], d)
-            print(dst_results.rowcount)
+        set_inserts(dst_engine, dst_conn, dst_metadata, tab['TABLE_NAME'])
 
-# for row in src_tabs:
-#     engine, conn, metadata = DB_CONN.get(row['TABLE_SCHEMA'])
-#     data = Table(row['TABLE_NAME'], metadata, autoload_with=engine)
-#     query = select(data)
-#     for d in conn.execute(query):
-#         print(d)
-
-
-# src_engine, src_conn, src_metadata = create_connect(DbMcsConfig, 'DB1')
-# dst_engine, dst_conn, dst_metadata = create_connect(DbWltConfig, 'DB1')
-#
-# inspector = inspect(src_engine)
-# tables = inspector.get_table_names()
-# print(tables)
-#
-# for table in tables:
-#     src_table = Table(table, src_metadata, autoload_with=src_engine)
-#     dst_table = Table(table, dst_metadata, autoload_with=dst_engine)
-#
-#     select_stmt = select(src_table)
-#     print('select_stmt', select_stmt)
-#     data = src_conn.execute(select_stmt).fetchall()
-#     print('data', data)
-#
-#     for row in data:
-#         insert_stmt = insert(dst_table).values(**row)
-#         print('insert_stmt', insert_stmt)
-#         dst_conn.execute(insert_stmt)
+        src_conn.close()
+        dst_conn.close()
